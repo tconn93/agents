@@ -13,6 +13,7 @@ RUN npm install --production
 # This includes the prompt file which the agent can load at runtime.
 COPY agent.js .
 COPY llm.js .
+COPY tools.js . 
 COPY prompts/ ./prompts/
 
 # Make port 8000 available to the world outside this container

@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy the rest of the application's code into the container
 COPY agent.py .
 COPY llm.py .
+COPY tools.py .
 COPY prompts/ ./prompts/
 
 # Make port 8000 available to the world outside this container

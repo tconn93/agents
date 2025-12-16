@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 
 from llm import get_llm
-from tools import TOOLS, get_tool_definitions
+from tools import get_filtered_tools, get_tool_definitions
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -16,6 +16,11 @@ load_dotenv()
 
 PROVIDER_NAME = os.getenv("PROVIDER")
 MODEL_NAME = os.getenv("MODEL")
+
+ALLOWED_TOOLS_CSV = os.getenv("ALLOWED_TOOLS")
+ALLOWED_TOOLS_LIST = ALLOWED_TOOLS_CSV.split(',') if ALLOWED_TOOLS_CSV else None
+MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", 5))
+
 
 def load_system_prompt(prompt_env_var: str) -> str:
     default_prompt = "You are a helpful AI assistant."
@@ -59,13 +64,17 @@ class ChatResponse(BaseModel):
 llm_provider = get_llm(PROVIDER_NAME, model=MODEL_NAME)
 print(f"Successfully initialized LLM provider: {PROVIDER_NAME} with model: {llm_provider.model}")
 
+# Filter tools based on environment configuration
+AVAILABLE_TOOLS = get_filtered_tools(ALLOWED_TOOLS_LIST)
+print(f"Agent initialized with tools: {list(AVAILABLE_TOOLS.keys())}")
+
 conversations: Dict[str, List[Dict[str, Any]]] = {} # In-memory storage
 
 # --- API Endpoints ---
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    MAX_TOOL_CALLS = 5
+    
     
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -77,13 +86,14 @@ async def chat(request: ChatRequest):
         for _ in range(MAX_TOOL_CALLS):
             response = await llm_provider.chat_completion(
                 messages=messages,
-                tools=get_tool_definitions(),
+                tools=get_tool_definitions(AVAILABLE_TOOLS),
                 temperature=0.7,
                 max_tokens=1024,
             )
             print(response)
             response_message = response['choices'][0]['message']
-            messages.append(response_message) # Add LLM response to history
+            if response_message['content']:
+                messages.append(response_message) # Add LLM response to history
 
             if response_message.get("tool_calls"):
                 print(f"[Agent] LLM requested tool call(s): {response_message['tool_calls']}")
@@ -91,7 +101,10 @@ async def chat(request: ChatRequest):
                 tool_tasks = []
                 for tool_call in tool_calls:
                     tool_name = tool_call['function']['name']
-                    tool_to_call = TOOLS[tool_name]['execute']
+                    if tool_name not in AVAILABLE_TOOLS:
+                        # This is a safeguard in case the LLM hallucinates a tool name
+                        raise HTTPException(status_code=400, detail=f"Attempted to use unavailable tool: {tool_name}")
+                    tool_to_call = AVAILABLE_TOOLS[tool_name]['execute']
                     tool_args = json.loads(tool_call['function']['arguments'])
                     tool_tasks.append(tool_to_call(**tool_args))
                 

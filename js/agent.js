@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { getLlm } from './llm.js';
-import { TOOLS, getToolDefinitions } from './tools.js';
+import { getFilteredTools, getToolDefinitions } from './tools.js';
 
 // --- Configuration ---
 dotenv.config();
@@ -13,6 +13,9 @@ const port = process.env.PORT || 8000;
 
 const PROVIDER_NAME = process.env.PROVIDER;
 const MODEL_NAME = process.env.MODEL;
+
+const ALLOWED_TOOLS_CSV = process.env.ALLOWED_TOOLS;
+const ALLOWED_TOOLS_LIST = ALLOWED_TOOLS_CSV ? ALLOWED_TOOLS_CSV.split(',') : null;
 
 function loadSystemPrompt(promptEnvVar) {
     const defaultPrompt = "You are a helpful AI assistant.";
@@ -46,6 +49,10 @@ try {
     process.exit(1);
 }
 
+// Filter tools based on environment configuration
+const AVAILABLE_TOOLS = getFilteredTools(ALLOWED_TOOLS_LIST);
+console.log(`Agent initialized with tools: ${Object.keys(AVAILABLE_TOOLS)}`);
+
 // --- Middleware and In-memory Storage ---
 app.use(express.json());
 const conversations = {}; // In-memory conversation storage
@@ -72,7 +79,7 @@ app.post("/chat", async (req, res) => {
         while (toolCallCount < MAX_TOOL_CALLS) {
             const response = await llmProvider.chatCompletion({
                 messages,
-                tools: getToolDefinitions(), // Provide the list of tools to the LLM
+                tools: getToolDefinitions(AVAILABLE_TOOLS), // Provide the list of allowed tools to the LLM
                 temperature: 0.7,
                 max_tokens: 1024,
             });
@@ -87,7 +94,12 @@ app.post("/chat", async (req, res) => {
                 // Execute all requested tools in parallel
                 const toolPromises = responseMessage.tool_calls.map(async (toolCall) => {
                     const toolName = toolCall.function.name;
-                    const tool = TOOLS[toolName];
+                    const tool = AVAILABLE_TOOLS[toolName];
+
+                    if (!tool) {
+                        // This is a safeguard in case the LLM hallucinates a tool name
+                        console.warn(`LLM attempted to use unavailable tool: ${toolName}`);
+                    }
 
                     if (!tool) {
                         return {
@@ -117,10 +129,8 @@ app.post("/chat", async (req, res) => {
                 // No tool call, so this is the final answer
                 const responseText = responseMessage.content;
                 
-                // The 'messages' array now contains the full conversation, including any tool calls.
-                // We add the final assistant response and then filter out the system prompt to create the final history.
-                messages.push(responseMessage);
-                const updatedHistory = messages.filter(msg => msg.role !== 'system');
+                // Update and save history
+                const updatedHistory = [...providedHistory, { role: "user", content: userMessage }, { role: "assistant", content: responseText }];
                 conversations["default"] = updatedHistory; // Using a simple default conversation ID
 
                 return res.json({

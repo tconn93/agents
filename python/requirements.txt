@@ -6,3 +6,5 @@ anthropic
 google-generativeai
 groq
 pydantic
+playwright
+httpx
