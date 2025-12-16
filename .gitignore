@@ -209,3 +209,10 @@ __marimo__/
 python/.env
 js/.env
 venv/
+
+
+CLAUDE.md
+
+response/test/
+
+js/node_modules/

@@ -31,7 +31,7 @@ class LLM(ABC):
         temperature: float,
         max_tokens: int,
         **kwargs: Any
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
         Generates a chat completion response.
 
@@ -42,7 +42,7 @@ class LLM(ABC):
             **kwargs: Additional provider-specific arguments.
 
         Returns:
-            The content of the assistant's response message as a string.
+            A dictionary representing the normalized response from the LLM.
         """
         pass
 
@@ -64,7 +64,7 @@ class OpenAIProvider(LLM):
         temperature: float,
         max_tokens: int,
         **kwargs: Any
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Generates a chat completion response using the OpenAI API."""
         # Separate system prompt if present, as it's a top-level parameter for some models
         system_prompt = ""
@@ -79,7 +79,7 @@ class OpenAIProvider(LLM):
             max_tokens=max_tokens,
             **kwargs
         )
-        return completion.choices[0].message.content
+        return completion.dict()
 
 class Grok(LLM):
     """LLM provider for xAI (Grok) models, using an OpenAI-compatible API."""
@@ -101,7 +101,7 @@ class Grok(LLM):
         temperature: float,
         max_tokens: int,
         **kwargs: Any
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Generates a chat completion response using the xAI API."""
         logger.info(
             "Calling xAI API.",
@@ -114,7 +114,8 @@ class Grok(LLM):
             max_tokens=max_tokens,
             **kwargs
         )
-        return completion.choices[0].message.content
+        # Normalize the response to a standard dictionary format
+        return completion.dict()
 
 
 class GroqProvider(LLM):
@@ -134,7 +135,7 @@ class GroqProvider(LLM):
         temperature: float,
         max_tokens: int,
         **kwargs: Any
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Generates a chat completion response using the Groq API."""
         logger.info(
             "Calling Groq API.",
@@ -147,7 +148,8 @@ class GroqProvider(LLM):
             max_tokens=max_tokens,
             **kwargs
         )
-        return completion.choices[0].message.content
+        # Normalize the response to a standard dictionary format
+        return completion.dict()
 
 
 class Claude(LLM):
@@ -167,7 +169,7 @@ class Claude(LLM):
         temperature: float,
         max_tokens: int,
         **kwargs: Any
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Generates a chat completion response using the Anthropic API."""
         system_prompt = ""
         if messages and messages[0]['role'] == 'system':
@@ -187,7 +189,10 @@ class Claude(LLM):
             max_tokens=max_tokens,
             **kwargs
         )
-        return completion.content[0].text
+        # Normalize the response to a standard dictionary format
+        return {
+            "choices": [{"message": {"role": "assistant", "content": completion.content[0].text}}]
+        }
 
 
 class Gemini(LLM):
@@ -211,7 +216,7 @@ class Gemini(LLM):
         temperature: float,
         max_tokens: int,
         **kwargs: Any
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Generates a chat completion response using the Google Gemini API."""
         # Gemini uses a different format for history and system prompts.
         # We adapt the standard message format to Gemini's format.
@@ -252,7 +257,10 @@ class Gemini(LLM):
                 temperature=temperature
             )
         )
-        return completion.text
+        # Normalize the response to a standard dictionary format
+        return {
+            "choices": [{"message": {"role": "assistant", "content": completion.text}}]
+        }
 
 # --- Provider Factory ---
 

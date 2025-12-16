@@ -16,7 +16,7 @@ class LLM {
         this.model = model;
     }
 
-    async chatCompletion(messages, temperature, maxTokens, kwargs = {}) {
+    async chatCompletion(options) {
         throw new Error("Method 'chatCompletion()' must be implemented.");
     }
 }
@@ -31,20 +31,23 @@ export class OpenAIProvider extends LLM {
         this.client = new OpenAI({ apiKey: this.apiKey });
     }
 
-    async chatCompletion(messages, temperature, maxTokens, kwargs = {}) {
+    async chatCompletion({ messages, temperature, maxTokens, ...kwargs }) {
         console.log(`Calling OpenAI API with model: ${this.model}`);
         const completion = await this.client.chat.completions.create({
             model: this.model,
-            messages: messages,
-            temperature: temperature,
+            messages,
+            temperature,
             max_tokens: maxTokens,
             ...kwargs,
         });
-        return completion.choices[0].message.content;
+        // Normalize the response to match the Gemini/Claude format.
+        return {
+            choices: [{ message: { role: 'assistant', content: completion.choices[0].message.content } }]
+        };
     }
 }
 
-export class GrokProvider extends LLM {
+export class XAIProvider extends LLM {
     constructor(apiKey = null, model = 'grok-4') {
         const resolvedApiKey = apiKey || process.env.XAI_API_KEY;
         if (!resolvedApiKey) {
@@ -57,16 +60,17 @@ export class GrokProvider extends LLM {
         });
     }
 
-    async chatCompletion(messages, temperature, maxTokens, kwargs = {}) {
+    async chatCompletion({ messages, temperature, maxTokens, ...kwargs }) {
         console.log(`Calling xAI (Grok) API with model: ${this.model}`);
         const completion = await this.client.chat.completions.create({
             model: this.model,
-            messages: messages,
-            temperature: temperature,
+            messages,
+            temperature,
             max_tokens: maxTokens,
             ...kwargs,
         });
-        return completion.choices[0].message.content;
+        // Normalize the response to match the Gemini/Claude format.
+        return completion;
     }
 }
 
@@ -80,16 +84,19 @@ export class GroqProvider extends LLM {
         this.client = new Groq({ apiKey: this.apiKey });
     }
 
-    async chatCompletion(messages, temperature, maxTokens, kwargs = {}) {
+    async chatCompletion({ messages, temperature, maxTokens, ...kwargs }) {
         console.log(`Calling Groq API with model: ${this.model}`);
         const completion = await this.client.chat.completions.create({
             model: this.model,
-            messages: messages,
-            temperature: temperature,
+            messages,
+            temperature,
             max_tokens: maxTokens,
             ...kwargs,
         });
-        return completion.choices[0].message.content;
+        // Normalize the response to match the Gemini/Claude format.
+        return {
+            choices: [{ message: { role: 'assistant', content: completion.choices[0].message.content } }]
+        };
     }
 }
 
@@ -103,7 +110,7 @@ export class ClaudeProvider extends LLM {
         this.client = new Anthropic({ apiKey: this.apiKey });
     }
 
-    async chatCompletion(messages, temperature, maxTokens, kwargs = {}) {
+    async chatCompletion({ messages, temperature, maxTokens, ...kwargs }) {
         console.log(`Calling Anthropic (Claude) API with model: ${this.model}`);
         let systemPrompt = '';
         if (messages.length > 0 && messages[0].role === 'system') {
@@ -114,11 +121,14 @@ export class ClaudeProvider extends LLM {
             model: this.model,
             system: systemPrompt,
             messages: messages,
-            temperature: temperature,
+            temperature,
             max_tokens: maxTokens,
             ...kwargs,
         });
-        return completion.content[0].text;
+        // Anthropic's response structure is different. We normalize it to look like OpenAI's.
+        return {
+            choices: [{ message: { role: 'assistant', content: completion.content[0].text } }]
+        };
     }
 }
 
@@ -132,7 +142,7 @@ export class GeminiProvider extends LLM {
         this.genAI = new GoogleGenerativeAI(this.apiKey);
     }
 
-    async chatCompletion(messages, temperature, maxTokens, kwargs = {}) {
+    async chatCompletion({ messages, temperature, maxTokens, ...kwargs }) {
         console.log(`Calling Google (Gemini) API with model: ${this.model}`);
         let systemPrompt = '';
         if (messages.length > 0 && messages[0].role === 'system') {
@@ -154,13 +164,16 @@ export class GeminiProvider extends LLM {
             maxOutputTokens: maxTokens,
         });
         const response = await result.response;
-        return response.text();
+        // Gemini's response structure is different. We normalize it to look like OpenAI's.
+        return {
+            choices: [{ message: { role: 'assistant', content: response.text() } }]
+        };
     }
 }
 
 const PROVIDERS = {
     openai: OpenAIProvider,
-    xai: GrokProvider,
+    xai: XAIProvider,
     groq: GroqProvider,
     claude: ClaudeProvider,
     gemini: GeminiProvider,

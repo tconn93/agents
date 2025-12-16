@@ -1,140 +1,130 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional, Dict
-import logging
 import os
-import uvicorn
-import uuid
+import json
+import asyncio
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from typing import List, Dict, Any, Optional
 
-from llm import get_llm, LLM, PROVIDERS
+from llm import get_llm
+from tools import TOOLS, get_tool_definitions
 
-load_dotenv()  # Load .env file if you have one
+# Load environment variables from a .env file
+load_dotenv()
 
-# --- Structured Logging Configuration ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-app = FastAPI(
-    title="Multi-Provider LLM Agent API",
-    description="A conversational AI agent that supports multiple LLM providers.",
-    version="1.1.0"
-)
-
-# --- Application Configuration ---
+# --- Configuration ---
 
 PROVIDER_NAME = os.getenv("PROVIDER")
 MODEL_NAME = os.getenv("MODEL")
 
-def load_system_prompt(prompt_env_var: Optional[str]) -> str:
-    """Loads the system prompt from a file path or directly from the env var."""
+def load_system_prompt(prompt_env_var: str) -> str:
     default_prompt = "You are a helpful AI assistant."
     if not prompt_env_var:
         return default_prompt
-    
-    # Check if the value is a path to an existing file
-    if os.path.isfile(prompt_env_var):
+    if os.path.exists(prompt_env_var):
         try:
             with open(prompt_env_var, 'r', encoding='utf-8') as f:
                 return f.read().strip()
         except Exception as e:
-            logger.warning(f"Could not read system prompt file '{prompt_env_var}'. Error: {e}. Using default.")
+            print(f"Warning: Could not read system prompt file '{prompt_env_var}'. Error: {e}. Using default.")
             return default_prompt
-    return prompt_env_var # Use the value directly if it's not a file path
+    return prompt_env_var
 
 SYSTEM_PROMPT = load_system_prompt(os.getenv("SYSTEM_PROMPT"))
 
 if not PROVIDER_NAME:
     raise ValueError("PROVIDER must be set in the environment or .env file.")
 
-# Instantiate the LLM provider once at startup
-try:
-    llm_provider: LLM = get_llm(provider_name=PROVIDER_NAME, model=MODEL_NAME)
-except ValueError as e:
-    logger.critical("Failed to initialize LLM provider on startup.", exc_info=True)
-    # Catch configuration errors on startup for immediate feedback
-    raise e
+# --- FastAPI App and Models ---
 
-# --- Pydantic Models ---
+app = FastAPI(
+    title="Multi-Provider LLM Agent API",
+    description="A conversational AI agent with tool-use capabilities.",
+)
 
-class Message(BaseModel):
-    role: str  # "user", "assistant", or "system"
+class ChatMessage(BaseModel):
+    role: str
     content: str
 
 class ChatRequest(BaseModel):
     message: str
-    history: Optional[List[Message]] = None
+    history: List[ChatMessage] = Field(default_factory=list)
 
 class ChatResponse(BaseModel):
     response: str
-    updated_history: List[Message]
+    updated_history: List[ChatMessage]
 
-# In-memory conversation storage (use Redis/DB for production)
-conversations: Dict[str, List[Message]] = {}
+# --- LLM Initialization and Storage ---
+
+llm_provider = get_llm(PROVIDER_NAME, model=MODEL_NAME)
+print(f"Successfully initialized LLM provider: {PROVIDER_NAME} with model: {llm_provider.model}")
+
+conversations: Dict[str, List[Dict[str, Any]]] = {} # In-memory storage
+
+# --- API Endpoints ---
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    user_message = request.message
-    provided_history = request.history or []
-    request_id = str(uuid.uuid4())
+async def chat(request: ChatRequest):
+    MAX_TOOL_CALLS = 5
+    
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *[msg.dict() for msg in request.history],
+        {"role": "user", "content": request.message},
+    ]
 
-    logger.info(f"Received chat request.", extra={"request_id": request_id, "history_len": len(provided_history)})
-    
-    # Simple conversation ID for this example
-    conv_id = "default"
-    
-    # Load existing history or start new
-    full_history = conversations.get(conv_id, provided_history)
-    
-    # Build the message list for the LLM
-    messages = []
-    if SYSTEM_PROMPT:
-        messages.append({"role": "system", "content": SYSTEM_PROMPT})
-    messages.extend([msg.dict() for msg in full_history])
-    messages.append({"role": "user", "content": user_message})
-    
-    logger.debug(f"Sending {len(messages)} messages to LLM.", extra={"request_id": request_id})
     try:
-        # Call the chat_completion method on the pre-configured provider
-        response_text = await llm_provider.chat_completion(
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1024,
-        )
+        for _ in range(MAX_TOOL_CALLS):
+            response = await llm_provider.chat_completion(
+                messages=messages,
+                tools=get_tool_definitions(),
+                temperature=0.7,
+                max_tokens=1024,
+            )
+            print(response)
+            response_message = response['choices'][0]['message']
+            messages.append(response_message) # Add LLM response to history
 
-    except ValueError as e:
-        logger.error(f"Validation error during LLM call.", extra={"request_id": request_id}, exc_info=True)
-        # This can still catch validation errors from the provider's client library
-        raise HTTPException(status_code=400, detail=str(e))
+            if response_message.get("tool_calls"):
+                print(f"[Agent] LLM requested tool call(s): {response_message['tool_calls']}")
+                tool_calls = response_message["tool_calls"]
+                tool_tasks = []
+                for tool_call in tool_calls:
+                    tool_name = tool_call['function']['name']
+                    tool_to_call = TOOLS[tool_name]['execute']
+                    tool_args = json.loads(tool_call['function']['arguments'])
+                    tool_tasks.append(tool_to_call(**tool_args))
+                
+                tool_outputs = await asyncio.gather(*tool_tasks)
+
+                for i, tool_call in enumerate(tool_calls):
+                    messages.append({
+                        "tool_call_id": tool_call['id'],
+                        "role": "tool",
+                        "name": tool_call['function']['name'],
+                        "content": tool_outputs[i],
+                    })
+            else:
+                final_response = response_message['content']
+                updated_history = [msg for msg in messages if msg['role'] != 'system']
+                conversations["default"] = updated_history
+                return ChatResponse(response=final_response, updated_history=updated_history)
+
+        raise HTTPException(status_code=500, detail="Exceeded maximum number of tool calls.")
+
     except Exception as e:
-        # This catches API errors from the provider's client
-        logger.error(f"LLM API error.", extra={"request_id": request_id}, exc_info=True)
+        print(f"LLM API error: {e}")
         raise HTTPException(status_code=500, detail=f"LLM API error: {str(e)}")
-    
-    # Update history
-    full_history.append(Message(role="user", content=user_message))
-    full_history.append(Message(role="assistant", content=response_text))
-    
-    # Save updated history
-    conversations[conv_id] = full_history
-    
-    logger.info("Successfully processed chat request.", extra={"request_id": request_id})
-    
-    return ChatResponse(
-        response=response_text,
-        updated_history=full_history
-    )
 
 @app.get("/health")
-async def health_check():
+async def health():
     return {
         "status": "healthy",
         "configured_provider": PROVIDER_NAME,
-        "configured_model": llm_provider.model # Get the actual model name from the instance
+        "configured_model": llm_provider.model,
     }
 
 if __name__ == "__main__":
+    import uvicorn
+    # This allows you to run the app directly with `python agent.py`
     uvicorn.run(app, host="0.0.0.0", port=8000)
