@@ -1,0 +1,12 @@
+# Ignore node_modules, as they will be installed inside the container
+node_modules/
+
+# Ignore local environment file - secrets should be passed at runtime
+.env
+
+# Ignore npm debug logs
+npm-debug.log*
+
+# Ignore IDE/editor-specific folders
+.vscode/
+.idea/

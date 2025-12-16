@@ -1,0 +1,16 @@
+# Ignore the virtual environment
+venv/
+.venv/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore local environment file - secrets should be passed at runtime
+.env
+
+# Ignore IDE/editor-specific folders
+.vscode/
+.idea/
