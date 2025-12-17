@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { getLlm } from './llm.js';
 import { getFilteredTools, getToolDefinitions } from './tools.js';
 
@@ -146,6 +147,129 @@ app.post("/chat", async (req, res) => {
         console.error("LLM API error:", e);
         res.status(500).json({ error: `LLM API error: ${e.message}` });
     }
+});
+
+// OpenAI-compatible chat completions endpoint
+app.post("/v1/chat/completions", async (req, res) => {
+    const {
+        model,
+        messages,
+        temperature = 0.7,
+        max_tokens = 1024,
+        tools = null,
+        stream = false
+    } = req.body;
+    const MAX_TOOL_CALLS = 5;
+
+    if (stream) {
+        return res.status(400).json({ error: "Streaming is not currently supported" });
+    }
+
+    if (!messages || !Array.isArray(messages)) {
+        return res.status(400).json({ error: "The 'messages' field is required and must be an array." });
+    }
+
+    // Use tools from request or default to available tools
+    const toolsToUse = tools !== null ? tools : getToolDefinitions(AVAILABLE_TOOLS);
+
+    try {
+        let toolCallCount = 0;
+        const workingMessages = [...messages];
+
+        while (toolCallCount < MAX_TOOL_CALLS) {
+            const response = await llmProvider.chatCompletion({
+                messages: workingMessages,
+                tools: toolsToUse,
+                temperature,
+                max_tokens,
+            });
+
+            const responseMessage = response.choices[0].message;
+
+            // Check if the LLM wants to call a tool
+            if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+                console.log("[Agent] LLM requested tool call(s):", responseMessage.tool_calls);
+                workingMessages.push(responseMessage);
+
+                const toolPromises = responseMessage.tool_calls.map(async (toolCall) => {
+                    const toolName = toolCall.function.name;
+                    const tool = AVAILABLE_TOOLS[toolName];
+
+                    if (!tool) {
+                        console.warn(`LLM attempted to use unavailable tool: ${toolName}`);
+                        return {
+                            tool_call_id: toolCall.id,
+                            role: "tool",
+                            name: toolName,
+                            content: `Error: Tool "${toolName}" not found.`,
+                        };
+                    }
+
+                    const args = JSON.parse(toolCall.function.arguments);
+                    const toolResult = await tool.execute(...Object.values(args));
+
+                    return {
+                        tool_call_id: toolCall.id,
+                        role: "tool",
+                        name: toolName,
+                        content: toolResult,
+                    };
+                });
+
+                const toolResults = await Promise.all(toolPromises);
+                workingMessages.push(...toolResults);
+                toolCallCount++;
+
+            } else {
+                // Final response - format as OpenAI response
+                return res.json({
+                    id: `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`,
+                    object: "chat.completion",
+                    created: Math.floor(Date.now() / 1000),
+                    model: model || llmProvider.model,
+                    choices: [
+                        {
+                            index: 0,
+                            message: {
+                                role: "assistant",
+                                content: responseMessage.content,
+                                tool_calls: responseMessage.tool_calls || null
+                            },
+                            finish_reason: "stop"
+                        }
+                    ],
+                    usage: {
+                        prompt_tokens: 0,  // Would need to implement token counting
+                        completion_tokens: 0,
+                        total_tokens: 0
+                    }
+                });
+            }
+        }
+
+        res.status(500).json({ error: "Exceeded maximum number of tool calls." });
+
+    } catch (e) {
+        console.error("LLM API error:", e);
+        res.status(500).json({ error: `LLM API error: ${e.message}` });
+    }
+});
+
+app.get("/v1/models", (req, res) => {
+    res.json({
+        object: "list",
+        data: [
+            {
+                id: llmProvider.model,
+                object: "model",
+                created: Math.floor(Date.now() / 1000),
+                owned_by: PROVIDER_NAME,
+                permission: [],
+                root: llmProvider.model,
+                parent: null,
+            }
+        ]
+    });
 });
 
 app.get("/health", (req, res) => {
