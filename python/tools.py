@@ -9,6 +9,7 @@ from math import sqrt
 from pathlib import Path
 from typing import List, Dict, Any
 import json
+from . import sandbox_api
 
 async def web_search(query: str) -> str:
     """
@@ -39,248 +40,133 @@ async def calculator(expression: str) -> str:
     except Exception as e:
         return f"Error evaluating expression: {e}"
 
+
+async def read_file(file_path: str, max_lines: int = 500) -> str:
+    """
+    Reads and returns the contents of a file from the sandbox.
+    """
+    print(f"[Tool] Executing read_file on: '{file_path}'")
+    content = await sandbox_api.read_file(file_path)
+
+    if content.startswith("Error"):
+        return content
+
+    lines = content.splitlines(True) # keepends=True
+    if len(lines) > max_lines:
+        content = "".join(lines[:max_lines])
+        content += f"\n\n... (truncated, showing first {max_lines} lines of {len(lines)} total)"
+
+    return f"Contents of {file_path}:\n\n{content}"
+
+async def write_file(file_path: str, content: str) -> str:
+    """
+    Writes content to a file in the sandbox. Creates the file if it doesn't exist, overwrites if it does.
+    """
+    print(f"[Tool] Executing write_file to: '{file_path}'")
+
+    # First, try to create the file.
+    create_response = await sandbox_api.create_file(file_path, content)
+
+    # If the file already exists, the API might return an error.
+    # In that case, we can try to update it.
+    if create_response == "Error: File already exists.":
+        print(f"[Tool] File '{file_path}' already exists. Attempting to update.")
+        update_response = await sandbox_api.update_file(file_path, content)
+        return update_response
+
+    return create_response
+
+async def bash_command(command: str, timeout: int = 30) -> str:
+    """
+    Executes a bash command in the sandbox and returns the output.
+    """
+    print(f"[Tool] Executing bash_command: '{command}'")
+    return await sandbox_api.run(command, timeout)
+
+async def bash_script(script_content: str, timeout: int = 60) -> str:
+    """
+    Executes a bash script provided as a string in the sandbox and returns the output.
+    """
+    print(f"[Tool] Executing bash_script")
+    # The sandbox API's /run endpoint can handle multi-line scripts directly.
+    return await sandbox_api.run(script_content, timeout)
+
+# ============================================================================
+# ============================================================================
+# PHASE 1: Essential Tools
+# ============================================================================
+
 async def explore_project(path: str = ".") -> str:
     """
     Explores a project directory structure and returns a tree-like representation.
     Lists directories and files up to a reasonable depth.
+    Note: This tool can be slow on large directories due to recursive API calls.
     """
     print(f"[Tool] Executing explore_project on path: '{path}'")
-    try:
-        path_obj = Path(path).resolve()
-        if not path_obj.exists():
-            return f"Error: Path '{path}' does not exist."
 
-        if not path_obj.is_dir():
-            return f"Error: Path '{path}' is not a directory."
+    async def _explore_recursive(current_path, indent=""):
+        # List the contents of the current directory
+        contents = await sandbox_api.list_directory(current_path)
+        if isinstance(contents, str): # Error handling
+            return [f"{indent}Error listing {current_path}: {contents}"]
 
-        result = [f"Directory structure of: {path_obj}\n"]
-        max_items = 100  # Limit output to prevent overwhelming the LLM
-        count = 0
+        tree = []
 
-        for root, dirs, files in os.walk(path_obj):
-            if count >= max_items:
-                result.append(f"\n... (truncated, showing first {max_items} items)")
-                break
+        for item in contents:
+            item_name = item['name']
+            item_type = item['type']
+            full_path = os.path.join(current_path, item_name)
 
-            # Filter out common directories to ignore
-            dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__', 'node_modules', '.venv', 'venv', '.env', 'dist', 'build']]
+            if item_type == "DIR":
+                tree.append(f"{indent}{item_name}/")
+                # Recursively explore subdirectories
+                tree.extend(await _explore_recursive(full_path, indent + "  "))
+            else: # FILE
+                tree.append(f"{indent}{item_name}")
 
-            level = str(root).replace(str(path_obj), '').count(os.sep)
-            indent = '  ' * level
-            result.append(f"{indent}{os.path.basename(root)}/")
+        return tree
 
-            sub_indent = '  ' * (level + 1)
-            for file in sorted(files)[:20]:  # Limit files per directory
-                if count >= max_items:
-                    break
-                result.append(f"{sub_indent}{file}")
-                count += 1
-
-        return "\n".join(result)
-    except Exception as e:
-        return f"Error exploring project: {e}"
-
-async def read_file(file_path: str, max_lines: int = 500) -> str:
-    """
-    Reads and returns the contents of a file.
-    Includes basic security checks to prevent reading sensitive files.
-    """
-    print(f"[Tool] Executing read_file on: '{file_path}'")
-    try:
-        path_obj = Path(file_path).resolve()
-
-        if not path_obj.exists():
-            return f"Error: File '{file_path}' does not exist."
-
-        if not path_obj.is_file():
-            return f"Error: '{file_path}' is not a file."
-
-        # Basic security: prevent reading sensitive files
-        sensitive_patterns = ['.env', 'id_rsa', '.pem', '.key', 'credentials']
-        if any(pattern in str(path_obj) for pattern in sensitive_patterns):
-            return f"Error: Cannot read potentially sensitive file '{file_path}'."
-
-        # Read file with line limit
-        with open(path_obj, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            if len(lines) > max_lines:
-                content = ''.join(lines[:max_lines])
-                content += f"\n\n... (truncated, showing first {max_lines} lines of {len(lines)} total)"
-            else:
-                content = ''.join(lines)
-
-        return f"Contents of {file_path}:\n\n{content}"
-    except UnicodeDecodeError:
-        return f"Error: File '{file_path}' appears to be binary or has encoding issues."
-    except Exception as e:
-        return f"Error reading file: {e}"
-
-async def write_file(file_path: str, content: str) -> str:
-    """
-    Writes content to a file. Creates the file if it doesn't exist, overwrites if it does.
-    Includes basic security checks.
-    """
-    print(f"[Tool] Executing write_file to: '{file_path}'")
-    try:
-        path_obj = Path(file_path).resolve()
-
-        # Basic security: prevent writing to sensitive locations
-        sensitive_patterns = ['.env', '.git/', 'id_rsa', '.pem', '.key', 'credentials']
-        if any(pattern in str(path_obj) for pattern in sensitive_patterns):
-            return f"Error: Cannot write to potentially sensitive location '{file_path}'."
-
-        # Create parent directories if they don't exist
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write the file
-        with open(path_obj, 'w', encoding='utf-8') as f:
-            f.write(content)
-
-        return f"Successfully wrote {len(content)} characters to {file_path}"
-    except Exception as e:
-        return f"Error writing file: {e}"
-
-async def bash_command(command: str, timeout: int = 30) -> str:
-    """
-    Executes a bash command and returns the output.
-    Includes timeout and basic security restrictions.
-    """
-    print(f"[Tool] Executing bash_command: '{command}'")
-    try:
-        # Basic security: block dangerous commands
-        dangerous_patterns = ['rm -rf /', 'mkfs', 'dd if=', ':(){:|:&};:', 'fork bomb']
-        if any(pattern in command.lower() for pattern in dangerous_patterns):
-            return f"Error: Command contains potentially dangerous pattern and was blocked."
-
-        # Execute the command with timeout
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-
-        output = []
-        if result.stdout:
-            output.append(f"STDOUT:\n{result.stdout}")
-        if result.stderr:
-            output.append(f"STDERR:\n{result.stderr}")
-        output.append(f"\nExit code: {result.returncode}")
-
-        return "\n".join(output) if output else "Command executed with no output."
-    except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after {timeout} seconds."
-    except Exception as e:
-        return f"Error executing command: {e}"
-
-async def bash_script(script_content: str, timeout: int = 60) -> str:
-    """
-    Executes a bash script provided as a string and returns the output.
-    The script is written to a temporary file and executed.
-    """
-    print(f"[Tool] Executing bash_script")
-    try:
-        import tempfile
-
-        # Basic security: block dangerous patterns
-        dangerous_patterns = ['rm -rf /', 'mkfs', 'dd if=', ':(){:|:&};:']
-        if any(pattern in script_content.lower() for pattern in dangerous_patterns):
-            return f"Error: Script contains potentially dangerous pattern and was blocked."
-
-        # Create temporary script file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-            f.write(script_content)
-            script_path = f.name
-
-        try:
-            # Make script executable
-            os.chmod(script_path, 0o755)
-
-            # Execute the script
-            result = subprocess.run(
-                ['bash', script_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
-
-            output = []
-            if result.stdout:
-                output.append(f"STDOUT:\n{result.stdout}")
-            if result.stderr:
-                output.append(f"STDERR:\n{result.stderr}")
-            output.append(f"\nExit code: {result.returncode}")
-
-            return "\n".join(output) if output else "Script executed with no output."
-        finally:
-            # Clean up temporary file
-            try:
-                os.unlink(script_path)
-            except:
-                pass
-
-    except subprocess.TimeoutExpired:
-        return f"Error: Script timed out after {timeout} seconds."
-    except Exception as e:
-        return f"Error executing script: {e}"
-
-# ============================================================================
-# PHASE 1: Essential Tools
-# ============================================================================
+    # Start the recursive exploration from the given path
+    result_tree = await _explore_recursive(path)
+    return f"Directory structure of: {path}\n" + "\n".join(result_tree)
 
 async def search_code(pattern: str, path: str = ".", file_pattern: str = "*", max_results: int = 50) -> str:
     """
     Searches for a pattern in files using grep-like functionality.
     Returns file paths, line numbers, and matching lines.
+    Note: This tool can be slow on large directories as it reads files one by one.
     """
     print(f"[Tool] Executing search_code with pattern: '{pattern}' in path: '{path}'")
-    try:
-        path_obj = Path(path).resolve()
-        if not path_obj.exists():
-            return f"Error: Path '{path}' does not exist."
 
-        results = []
-        count = 0
-        ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build'}
+    # Use the find_files tool to get a list of files to search
+    files_str = await find_files(file_pattern, path)
+    if files_str.startswith("No files found"):
+        return "No files to search."
 
-        for root, dirs, files in os.walk(path_obj):
-            # Filter out ignored directories
-            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+    files = files_str.splitlines()
 
-            for file in files:
+    results = []
+    count = 0
+
+    for file_path in files:
+        if count >= max_results:
+            break
+
+        content = await sandbox_api.read_file(file_path)
+        if content.startswith("Error"):
+            continue
+
+        for line_num, line in enumerate(content.splitlines(), 1):
+            if re.search(pattern, line, re.IGNORECASE):
+                results.append(f"{file_path}:{line_num}: {line.strip()}")
+                count += 1
                 if count >= max_results:
-                    results.append(f"\n... (truncated, showing first {max_results} matches)")
                     break
 
-                file_path = Path(root) / file
+    if not results:
+        return f"No matches found for pattern '{pattern}' in {path}"
 
-                # Skip binary and sensitive files
-                if file.endswith(('.pyc', '.so', '.dll', '.exe', '.jpg', '.png', '.gif', '.pdf')):
-                    continue
-                if '.env' in str(file_path) or '.key' in str(file_path):
-                    continue
-
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        for line_num, line in enumerate(f, 1):
-                            if re.search(pattern, line, re.IGNORECASE):
-                                results.append(f"{file_path}:{line_num}: {line.strip()}")
-                                count += 1
-                                if count >= max_results:
-                                    break
-                except (UnicodeDecodeError, PermissionError):
-                    continue
-
-            if count >= max_results:
-                break
-
-        if not results:
-            return f"No matches found for pattern '{pattern}' in {path}"
-
-        return "\n".join(results)
-    except Exception as e:
-        return f"Error searching code: {e}"
+    return "\n".join(results)
 
 async def edit_file(file_path: str, old_text: str, new_text: str) -> str:
     """
@@ -288,405 +174,195 @@ async def edit_file(file_path: str, old_text: str, new_text: str) -> str:
     More efficient than rewriting entire file.
     """
     print(f"[Tool] Executing edit_file on: '{file_path}'")
-    try:
-        path_obj = Path(file_path).resolve()
 
-        if not path_obj.exists():
-            return f"Error: File '{file_path}' does not exist."
+    # Read the file content
+    content = await sandbox_api.read_file(file_path)
+    if content.startswith("Error"):
+        return content
 
-        # Security check
-        sensitive_patterns = ['.env', '.git/', 'id_rsa', '.pem', '.key', 'credentials']
-        if any(pattern in str(path_obj) for pattern in sensitive_patterns):
-            return f"Error: Cannot edit potentially sensitive file '{file_path}'."
+    # Check if old_text exists
+    if old_text not in content:
+        return f"Error: Text to replace not found in {file_path}"
 
-        # Read file
-        with open(path_obj, 'r', encoding='utf-8') as f:
-            content = f.read()
+    # Replace text
+    new_content = content.replace(old_text, new_text, 1)  # Replace first occurrence
 
-        # Check if old_text exists
-        if old_text not in content:
-            return f"Error: Text to replace not found in {file_path}"
+    # Write back the updated content
+    return await sandbox_api.update_file(file_path, new_content)
 
-        # Replace text
-        new_content = content.replace(old_text, new_text, 1)  # Replace first occurrence
+async def search_and_replace(file_path: str, search_pattern: str, replace_text: str, is_regex: bool = False) -> str:
+    """
+    Searches for a pattern in a file and replaces all occurrences.
+    """
+    print(f"[Tool] Executing search_and_replace on: '{file_path}'")
 
-        # Write back
-        with open(path_obj, 'w', encoding='utf-8') as f:
-            f.write(new_content)
+    content = await sandbox_api.read_file(file_path)
+    if content.startswith("Error"):
+        return content
 
-        return f"Successfully edited {file_path}"
-    except Exception as e:
-        return f"Error editing file: {e}"
+    if is_regex:
+        new_content, count = re.subn(search_pattern, replace_text, content)
+    else:
+        count = content.count(search_pattern)
+        new_content = content.replace(search_pattern, replace_text)
+
+    if count == 0:
+        return f"Pattern not found in {file_path}."
+
+    result = await sandbox_api.update_file(file_path, new_content)
+    if result.startswith("Error"):
+        return result
+
+    return f"Replaced {count} occurrences in {file_path}."
+
+async def copy_file(source_path: str, destination_path: str) -> str:
+    """
+    Copies a file from a source path to a destination path.
+    """
+    print(f"[Tool] Executing copy_file from '{source_path}' to '{destination_path}'")
+
+    content = await sandbox_api.read_file(source_path)
+    if content.startswith("Error"):
+        return content
+
+    result = await sandbox_api.create_file(destination_path, content)
+    return result
+
+async def move_file(source_path: str, destination_path: str) -> str:
+    """
+    Moves a file from a source path to a destination path.
+    """
+    print(f"[Tool] Executing move_file from '{source_path}' to '{destination_path}'")
+
+    # Implemented as copy-then-delete as the API lacks a rename/move endpoint.
+    copy_result = await copy_file(source_path, destination_path)
+    if copy_result.startswith("Error"):
+        return f"Error during move (copy step): {copy_result}"
+
+    delete_result = await sandbox_api.delete_file(source_path)
+    if delete_result.startswith("Error"):
+        return f"Warning: File copied to '{destination_path}' but failed to delete original at '{source_path}': {delete_result}"
+
+    return f"File successfully moved from '{source_path}' to '{destination_path}'."
 
 async def find_files(pattern: str, path: str = ".", max_results: int = 100) -> str:
     """
     Finds files matching a pattern (glob-style or regex).
     Returns list of matching file paths.
+    Note: This tool can be slow on large directories due to recursive API calls.
     """
     print(f"[Tool] Executing find_files with pattern: '{pattern}' in path: '{path}'")
-    try:
-        path_obj = Path(path).resolve()
-        if not path_obj.exists():
-            return f"Error: Path '{path}' does not exist."
 
-        results = []
-        count = 0
-        ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build'}
+    all_files = []
+    async def _find_recursive(current_path):
+        contents = await sandbox_api.list_directory(current_path)
+        if isinstance(contents, str): # Error handling
+            return
 
-        # Check if pattern is glob or regex
-        is_glob = '*' in pattern or '?' in pattern
+        for item in contents:
+            item_name = item['name']
+            item_type = item['type']
+            full_path = os.path.join(current_path, item_name)
 
-        for root, dirs, files in os.walk(path_obj):
-            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+            if item_type == "DIR":
+                await _find_recursive(full_path)
+            else: # FILE
+                all_files.append(full_path)
 
-            for file in files:
-                if count >= max_results:
-                    results.append(f"\n... (truncated, showing first {max_results} results)")
-                    break
+    await _find_recursive(path)
 
-                if is_glob:
-                    from fnmatch import fnmatch
-                    if fnmatch(file, pattern):
-                        results.append(str(Path(root) / file))
-                        count += 1
-                else:
-                    if re.search(pattern, file):
-                        results.append(str(Path(root) / file))
-                        count += 1
+    # Now filter the collected files
+    results = []
+    count = 0
+    is_glob = '*' in pattern or '?' in pattern
 
-            if count >= max_results:
-                break
+    for file_path in all_files:
+        if count >= max_results:
+            break
 
-        if not results:
-            return f"No files found matching pattern '{pattern}' in {path}"
+        file_name = os.path.basename(file_path)
 
-        return "\n".join(results)
-    except Exception as e:
-        return f"Error finding files: {e}"
-
-async def git_status(repo_path: str = ".") -> str:
-    """
-    Returns the git status of a repository.
-    """
-    print(f"[Tool] Executing git_status in: '{repo_path}'")
-    try:
-        result = subprocess.run(
-            ['git', 'status'],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return "Error: Git status command timed out."
-    except Exception as e:
-        return f"Error executing git status: {e}"
-
-async def git_diff(repo_path: str = ".", file_path: str = None) -> str:
-    """
-    Returns the git diff for the repository or a specific file.
-    """
-    print(f"[Tool] Executing git_diff in: '{repo_path}'")
-    try:
-        cmd = ['git', 'diff']
-        if file_path:
-            cmd.append(file_path)
-
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-
-        if not result.stdout:
-            return "No changes detected."
-
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return "Error: Git diff command timed out."
-    except Exception as e:
-        return f"Error executing git diff: {e}"
-
-async def git_commit(message: str, repo_path: str = ".") -> str:
-    """
-    Creates a git commit with the specified message.
-    """
-    print(f"[Tool] Executing git_commit with message: '{message}'")
-    try:
-        # First check if there are staged changes
-        status_result = subprocess.run(
-            ['git', 'diff', '--cached', '--quiet'],
-            cwd=repo_path,
-            capture_output=True,
-            timeout=10
-        )
-
-        if status_result.returncode == 0:
-            return "Error: No staged changes to commit. Use git_add first."
-
-        result = subprocess.run(
-            ['git', 'commit', '-m', message],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return "Error: Git commit command timed out."
-    except Exception as e:
-        return f"Error executing git commit: {e}"
-
-async def git_add(file_paths: str, repo_path: str = ".") -> str:
-    """
-    Stages files for commit. file_paths can be a single file or multiple files separated by spaces.
-    """
-    print(f"[Tool] Executing git_add for: '{file_paths}'")
-    try:
-        files = file_paths.split()
-        cmd = ['git', 'add'] + files
-
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-
-        return f"Successfully staged: {file_paths}"
-    except subprocess.TimeoutExpired:
-        return "Error: Git add command timed out."
-    except Exception as e:
-        return f"Error executing git add: {e}"
-
-async def git_log(repo_path: str = ".", max_count: int = 10) -> str:
-    """
-    Returns the git log with recent commits.
-    """
-    print(f"[Tool] Executing git_log in: '{repo_path}'")
-    try:
-        result = subprocess.run(
-            ['git', 'log', f'--max-count={max_count}', '--oneline', '--decorate'],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
-
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return "Error: Git log command timed out."
-    except Exception as e:
-        return f"Error executing git log: {e}"
-
-async def git_branch(repo_path: str = ".", action: str = "list", branch_name: str = None) -> str:
-    """
-    Git branch operations: list, create, or switch branches.
-    action: 'list', 'create', 'switch'
-    """
-    print(f"[Tool] Executing git_branch with action: '{action}'")
-    try:
-        if action == "list":
-            cmd = ['git', 'branch', '-a']
-        elif action == "create":
-            if not branch_name:
-                return "Error: branch_name required for create action."
-            cmd = ['git', 'branch', branch_name]
-        elif action == "switch":
-            if not branch_name:
-                return "Error: branch_name required for switch action."
-            cmd = ['git', 'checkout', branch_name]
+        if is_glob:
+            from fnmatch import fnmatch
+            if fnmatch(file_name, pattern):
+                results.append(file_path)
+                count += 1
         else:
-            return f"Error: Invalid action '{action}'. Use 'list', 'create', or 'switch'."
+            if re.search(pattern, file_name):
+                results.append(file_path)
+                count += 1
 
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+    if not results:
+        return f"No files found matching pattern '{pattern}' in {path}"
 
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
+    return "\n".join(results)
 
-        return result.stdout if result.stdout else f"Successfully executed git branch {action}"
-    except subprocess.TimeoutExpired:
-        return "Error: Git branch command timed out."
-    except Exception as e:
-        return f"Error executing git branch: {e}"
 
 # ============================================================================
 # PHASE 2: High Value Tools
 # ============================================================================
 
-async def search_and_replace(pattern: str, replacement: str, path: str = ".", file_pattern: str = "*", dry_run: bool = True) -> str:
+async def git_status() -> str:
     """
-    Find and replace text across multiple files.
-    dry_run=True shows what would be changed without actually changing it.
+    Returns the git status of a repository.
     """
-    print(f"[Tool] Executing search_and_replace: '{pattern}' -> '{replacement}' (dry_run={dry_run})")
-    try:
-        path_obj = Path(path).resolve()
-        if not path_obj.exists():
-            return f"Error: Path '{path}' does not exist."
+    print(f"[Tool] Executing git_status")
+    return await sandbox_api.git_status()
 
-        results = []
-        files_changed = 0
-        total_replacements = 0
-        ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build'}
-
-        for root, dirs, files in os.walk(path_obj):
-            dirs[:] = [d for d in dirs if d not in ignore_dirs]
-
-            for file in files:
-                file_path = Path(root) / file
-
-                # Skip binary and sensitive files
-                if file.endswith(('.pyc', '.so', '.dll', '.exe', '.jpg', '.png', '.gif', '.pdf')):
-                    continue
-                if '.env' in str(file_path) or '.key' in str(file_path):
-                    continue
-
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-
-                    # Check if pattern exists
-                    matches = len(re.findall(pattern, content))
-                    if matches > 0:
-                        if dry_run:
-                            results.append(f"{file_path}: {matches} match(es)")
-                        else:
-                            new_content = re.sub(pattern, replacement, content)
-                            with open(file_path, 'w', encoding='utf-8') as f:
-                                f.write(new_content)
-                            results.append(f"{file_path}: {matches} replacement(s) made")
-
-                        files_changed += 1
-                        total_replacements += matches
-
-                except (UnicodeDecodeError, PermissionError):
-                    continue
-
-        if not results:
-            return f"No matches found for pattern '{pattern}'"
-
-        summary = f"{'[DRY RUN] ' if dry_run else ''}Found {total_replacements} match(es) in {files_changed} file(s)\n\n"
-        return summary + "\n".join(results)
-    except Exception as e:
-        return f"Error in search and replace: {e}"
-
-async def copy_file(source: str, destination: str) -> str:
+async def git_commit(message: str) -> str:
     """
-    Copies a file or directory from source to destination.
+    Creates a git commit with the specified message.
     """
-    print(f"[Tool] Executing copy_file: '{source}' -> '{destination}'")
-    try:
-        import shutil
+    print(f"[Tool] Executing git_commit with message: '{message}'")
+    return await sandbox_api.git_commit(message)
 
-        source_path = Path(source).resolve()
-        dest_path = Path(destination).resolve()
-
-        if not source_path.exists():
-            return f"Error: Source '{source}' does not exist."
-
-        # Security check
-        sensitive_patterns = ['.env', '.git/', 'id_rsa', '.pem', '.key', 'credentials']
-        if any(pattern in str(dest_path) for pattern in sensitive_patterns):
-            return f"Error: Cannot copy to sensitive location '{destination}'."
-
-        if source_path.is_dir():
-            shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
-            return f"Successfully copied directory '{source}' to '{destination}'"
-        else:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, dest_path)
-            return f"Successfully copied file '{source}' to '{destination}'"
-    except Exception as e:
-        return f"Error copying file: {e}"
-
-async def move_file(source: str, destination: str) -> str:
+async def git_add(file_paths: str) -> str:
     """
-    Moves/renames a file or directory from source to destination.
+    Stages files for commit. file_paths can be a single file or multiple files separated by spaces.
     """
-    print(f"[Tool] Executing move_file: '{source}' -> '{destination}'")
-    try:
-        import shutil
+    print(f"[Tool] Executing git_add for: '{file_paths}'")
+    files = file_paths.split()
+    return await sandbox_api.git_add(files)
 
-        source_path = Path(source).resolve()
-        dest_path = Path(destination).resolve()
+async def git_branch(action: str = "list", branch_name: str = None) -> str:
+    """
+    Git branch operations: list, create, or switch branches.
+    action: 'list', 'create', 'switch'
+    """
+    print(f"[Tool] Executing git_branch with action: '{action}'")
+    if action == "switch":
+        return await sandbox_api.git_checkout(branch_name)
+    elif action == "create":
+        return await sandbox_api.git_branch(branch_name)
+    else: # list
+        return await sandbox_api.git_branch()
 
-        if not source_path.exists():
-            return f"Error: Source '{source}' does not exist."
+async def git_diff(cached: bool = False) -> str:
+    """
+    Shows git diff. Use cached=True for staged changes.
+    """
+    print(f"[Tool] Executing git_diff with cached={cached}")
+    command = "git diff"
+    if cached:
+        command += " --cached"
+    return await sandbox_api.run(command)
 
-        # Security check
-        sensitive_patterns = ['.env', '.git/', 'id_rsa', '.pem', '.key', 'credentials']
-        if any(pattern in str(source_path) for pattern in sensitive_patterns):
-            return f"Error: Cannot move sensitive file '{source}'."
-        if any(pattern in str(dest_path) for pattern in sensitive_patterns):
-            return f"Error: Cannot move to sensitive location '{destination}'."
-
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source_path), str(dest_path))
-        return f"Successfully moved '{source}' to '{destination}'"
-    except Exception as e:
-        return f"Error moving file: {e}"
+async def git_log(max_count: int = 10) -> str:
+    """
+    Shows git log.
+    """
+    print(f"[Tool] Executing git_log with max_count={max_count}")
+    command = f"git log -n {max_count} --oneline"
+    return await sandbox_api.run(command)
 
 async def delete_file(path: str, confirm: bool = False) -> str:
     """
-    Deletes a file or directory. Requires confirm=True for safety.
+    Deletes a file or directory from the sandbox. Requires confirm=True for safety.
     """
     print(f"[Tool] Executing delete_file on: '{path}'")
-    try:
-        if not confirm:
-            return "Error: Must set confirm=True to delete files. This is a safety measure."
-
-        import shutil
-
-        path_obj = Path(path).resolve()
-
-        if not path_obj.exists():
-            return f"Error: Path '{path}' does not exist."
-
-        # Security check - prevent deleting critical paths
-        critical_patterns = ['.git', '.env', 'id_rsa', '.pem', '.key', 'credentials']
-        if any(pattern in str(path_obj) for pattern in critical_patterns):
-            return f"Error: Cannot delete sensitive path '{path}'."
-
-        # Prevent deleting root-level directories
-        if len(path_obj.parts) <= 2:
-            return f"Error: Cannot delete root-level path '{path}' for safety."
-
-        if path_obj.is_dir():
-            shutil.rmtree(path_obj)
-            return f"Successfully deleted directory '{path}'"
-        else:
-            path_obj.unlink()
-            return f"Successfully deleted file '{path}'"
-    except Exception as e:
-        return f"Error deleting file: {e}"
+    if not confirm:
+        return "Error: Must set confirm=True to delete files. This is a safety measure."
+    return await sandbox_api.delete_file(path)
 
 async def install_package(package_name: str, package_manager: str = "auto") -> str:
     """
@@ -909,38 +585,25 @@ async def format_code(file_path: str = ".", formatter: str = "auto") -> str:
     except Exception as e:
         return f"Error formatting code: {e}"
 
-async def list_directory(path: str = ".", show_hidden: bool = False) -> str:
+async def list_directory(path: str = ".") -> str:
     """
-    Lists contents of a directory with details.
+    Lists contents of a directory in the sandbox.
     """
     print(f"[Tool] Executing list_directory on: '{path}'")
-    try:
-        path_obj = Path(path).resolve()
-        if not path_obj.exists():
-            return f"Error: Path '{path}' does not exist."
 
-        if not path_obj.is_dir():
-            return f"Error: '{path}' is not a directory."
+    contents = await sandbox_api.list_directory(path)
 
-        items = []
-        for item in sorted(path_obj.iterdir()):
-            if not show_hidden and item.name.startswith('.'):
-                continue
+    if isinstance(contents, str): # Error handling
+        return contents
 
-            item_type = "DIR" if item.is_dir() else "FILE"
-            try:
-                size = item.stat().st_size if item.is_file() else "-"
-                items.append(f"{item_type:6} {size:>12} {item.name}")
-            except:
-                items.append(f"{item_type:6} {'?':>12} {item.name}")
+    if not contents:
+        return f"Directory '{path}' is empty."
 
-        if not items:
-            return f"Directory '{path}' is empty."
+    # Format the output string from the structured data
+    output_lines = [f"{item['type']:<5} {item['size']:>10} {item['name']}" for item in contents]
 
-        header = f"Contents of {path}:\n{'TYPE':6} {'SIZE':>12} NAME\n" + "-" * 50
-        return header + "\n" + "\n".join(items)
-    except Exception as e:
-        return f"Error listing directory: {e}"
+    header = f"Contents of {path}:\n" + "-" * 50
+    return header + "\n" + "\n".join(output_lines)
 
 async def get_file_info(file_path: str) -> str:
     """
@@ -1252,6 +915,42 @@ TOOLS = {
             },
         },
     },
+    "copy_file": {
+        "execute": copy_file,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "copy_file",
+                "description": "Copies a file from a source path to a destination path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_path": {"type": "string", "description": "The path of the file to copy."},
+                        "destination_path": {"type": "string", "description": "The path to copy the file to."},
+                    },
+                    "required": ["source_path", "destination_path"],
+                },
+            },
+        },
+    },
+    "move_file": {
+        "execute": move_file,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "move_file",
+                "description": "Moves a file from a source path to a destination path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_path": {"type": "string", "description": "The path of the file to move."},
+                        "destination_path": {"type": "string", "description": "The path to move the file to."},
+                    },
+                    "required": ["source_path", "destination_path"],
+                },
+            },
+        },
+    },
     "calculator": {
         "execute": calculator,
         "definition": {
@@ -1265,23 +964,6 @@ TOOLS = {
                         "expression": {"type": "string", "description": "The mathematical expression to evaluate (e.g., 'sqrt(529)', '12 * 4')."},
                     },
                     "required": ["expression"],
-                },
-            },
-        },
-    },
-    "explore_project": {
-        "execute": explore_project,
-        "definition": {
-            "type": "function",
-            "function": {
-                "name": "explore_project",
-                "description": "Explores and returns the directory structure of a project. Useful for understanding codebase organization.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "The directory path to explore. Defaults to current directory '.'"},
-                    },
-                    "required": [],
                 },
             },
         },
@@ -1359,6 +1041,23 @@ TOOLS = {
         },
     },
     # === Phase 1 Tools ===
+    "explore_project": {
+        "execute": explore_project,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "explore_project",
+                "description": "Explores and returns the directory structure of a project. Useful for understanding codebase organization.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "The directory path to explore. Defaults to current directory '.'"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+    },
     "search_code": {
         "execute": search_code,
         "definition": {
@@ -1375,6 +1074,26 @@ TOOLS = {
                         "max_results": {"type": "integer", "description": "Maximum number of matches to return (default: 50)."},
                     },
                     "required": ["pattern"],
+                },
+            },
+        },
+    },
+    "search_and_replace": {
+        "execute": search_and_replace,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "search_and_replace",
+                "description": "Searches for a pattern in a file and replaces all occurrences.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "The path to the file to edit."},
+                        "search_pattern": {"type": "string", "description": "The text or regex pattern to search for."},
+                        "replace_text": {"type": "string", "description": "The text to replace the search pattern with."},
+                        "is_regex": {"type": "boolean", "description": "Whether the search pattern is a regex (default: false)."},
+                    },
+                    "required": ["file_path", "search_pattern", "replace_text"],
                 },
             },
         },
@@ -1417,6 +1136,7 @@ TOOLS = {
             },
         },
     },
+    # === Phase 2 Tools ===
     "git_status": {
         "execute": git_status,
         "definition": {
@@ -1426,27 +1146,7 @@ TOOLS = {
                 "description": "Returns the git status of a repository showing staged/unstaged changes.",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "repo_path": {"type": "string", "description": "Path to the git repository (default: '.')."},
-                    },
-                    "required": [],
-                },
-            },
-        },
-    },
-    "git_diff": {
-        "execute": git_diff,
-        "definition": {
-            "type": "function",
-            "function": {
-                "name": "git_diff",
-                "description": "Shows git diff for repository or specific file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "repo_path": {"type": "string", "description": "Path to the git repository (default: '.')."},
-                        "file_path": {"type": "string", "description": "Specific file to diff (optional)."},
-                    },
+                    "properties": {},
                     "required": [],
                 },
             },
@@ -1463,7 +1163,6 @@ TOOLS = {
                     "type": "object",
                     "properties": {
                         "message": {"type": "string", "description": "The commit message."},
-                        "repo_path": {"type": "string", "description": "Path to the git repository (default: '.')."},
                     },
                     "required": ["message"],
                 },
@@ -1481,9 +1180,25 @@ TOOLS = {
                     "type": "object",
                     "properties": {
                         "file_paths": {"type": "string", "description": "File paths to stage, space-separated."},
-                        "repo_path": {"type": "string", "description": "Path to the git repository (default: '.')."},
                     },
                     "required": ["file_paths"],
+                },
+            },
+        },
+    },
+    "git_diff": {
+        "execute": git_diff,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Shows git diff. Use cached=True for staged changes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cached": {"type": "boolean", "description": "Whether to show staged changes (default: false)."},
+                    },
+                    "required": [],
                 },
             },
         },
@@ -1494,11 +1209,10 @@ TOOLS = {
             "type": "function",
             "function": {
                 "name": "git_log",
-                "description": "Shows git commit history.",
+                "description": "Shows git log.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "repo_path": {"type": "string", "description": "Path to the git repository (default: '.')."},
                         "max_count": {"type": "integer", "description": "Maximum number of commits to show (default: 10)."},
                     },
                     "required": [],
@@ -1516,69 +1230,10 @@ TOOLS = {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "repo_path": {"type": "string", "description": "Path to the git repository (default: '.')."},
                         "action": {"type": "string", "description": "Action to perform: 'list', 'create', or 'switch' (default: 'list')."},
                         "branch_name": {"type": "string", "description": "Branch name for create/switch actions."},
                     },
                     "required": [],
-                },
-            },
-        },
-    },
-    # === Phase 2 Tools ===
-    "search_and_replace": {
-        "execute": search_and_replace,
-        "definition": {
-            "type": "function",
-            "function": {
-                "name": "search_and_replace",
-                "description": "Find and replace text across multiple files using regex. Supports dry-run mode.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string", "description": "The regex pattern to search for."},
-                        "replacement": {"type": "string", "description": "The replacement text."},
-                        "path": {"type": "string", "description": "Directory to search in (default: '.')."},
-                        "file_pattern": {"type": "string", "description": "File pattern filter (default: '*')."},
-                        "dry_run": {"type": "boolean", "description": "If true, shows what would change without making changes (default: true)."},
-                    },
-                    "required": ["pattern", "replacement"],
-                },
-            },
-        },
-    },
-    "copy_file": {
-        "execute": copy_file,
-        "definition": {
-            "type": "function",
-            "function": {
-                "name": "copy_file",
-                "description": "Copies a file or directory from source to destination.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string", "description": "Source file or directory path."},
-                        "destination": {"type": "string", "description": "Destination path."},
-                    },
-                    "required": ["source", "destination"],
-                },
-            },
-        },
-    },
-    "move_file": {
-        "execute": move_file,
-        "definition": {
-            "type": "function",
-            "function": {
-                "name": "move_file",
-                "description": "Moves or renames a file or directory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string", "description": "Source file or directory path."},
-                        "destination": {"type": "string", "description": "Destination path."},
-                    },
-                    "required": ["source", "destination"],
                 },
             },
         },
@@ -1705,7 +1360,6 @@ TOOLS = {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Directory path (default: '.')."},
-                        "show_hidden": {"type": "boolean", "description": "Show hidden files (default: false)."},
                     },
                     "required": [],
                 },
